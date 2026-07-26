@@ -27,6 +27,26 @@ package com.axon.java.stack.juc.sync;
  * 	4.每个对象都能成为锁的原因:
  * 	•   因为Java中的每个对象都与一个隐含的监视器锁相关联，这使得每个对象都可以用作同步代码块中的锁。
  *
+ *
+ *
+ *
+ * 	普通对象 Person { name, age }
+ *         │
+ *         │ synchronized(person) 升级为重量级锁时
+ *         ▼
+ *    ObjectMonitor（只管锁，不管 name/age）
+ *    ┌─────────────────────┐
+ *    │ _owner    = 线程A   │ ← 当前谁持锁
+ *    │ _count    = 1       │ ← 重入次数
+ *    │ _EntryList = [B, C] │ ← BLOCKED 排队
+ *    │ _WaitSet  = [D]     │ ← 调了 wait() 等着
+ *    └─────────────────────┘
+ *
+ *
+ * 在java中为什么任何一个对象都可以成为锁？
+    对象由对象头、实例数据、对齐填充构成。对象头中的 Mark Word 存了 hashcode、分代年龄、锁标记位、偏向锁持有者线程 ID。
+    锁升级从无锁 → 偏向锁（存线程 ID）→ 轻量级锁（存栈指针）→ 重量级锁（存 ObjectMonitor 指针）。ObjectMonitor 是 JVM 的 C++ 对象，内部维护 _owner、_EntryList、_WaitSet 等。
+    Mark Word 的多态性让它既可以存偏向线程 ID，也可以存 ObjectMonitor 地址。正因为对象天生带有这个锁标记位，所以 Java 里任何对象都能当锁。
  */
 
 public class SyncSummaryTest {

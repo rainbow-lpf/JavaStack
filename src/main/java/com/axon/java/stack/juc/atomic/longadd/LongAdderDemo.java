@@ -71,6 +71,49 @@ class AdderDemo {
  * 	•	AtomicLong 适合中低并发场景。
  * 	•	LongAdder 适合高并发的累加操作，且需要较高的性能。
  * 	•	LongAccumulator 适合高并发且需要自定义累加操作的场景。
+ *
+ *
+ *
+ * > **AtomicLong 的问题：** 所有线程争抢同一个 value，高并发下 CAS 自旋空转，CPU 打满。
+ * >
+ * > **LongAdder 的思路：** 分散热点——内部维护一个 `base` + `Cell[]` 数组。无竞争时直接 CAS `base`；有竞争时，每个线程 hash 到不同 Cell，各自 CAS 自己的 Cell。求和时把 base + 所有 Cell 累加。
+ * >
+ * > **三个关键设计：**
+ * > 1. `@Contended` 注解防止 Cell 伪共享；
+ * > 2. CAS spinlock（`cellsBusy`）保护扩容，不用 synchronized；
+ * > 3. 发生冲突才扩容，Cell 数最多到 CPU 核数。
+ *
+ * ---
+ *
+ * ## 一句话总结
+ *
+ * > **AtomicLong 所有人挤一个窗口，LongAdder 开多个窗口分散排队，最后算总账。**
+ *
+ * ---
+ *
+ * ## 可以画在纸上的图
+ *
+ * ```
+ * AtomicLong:          LongAdder:
+ *
+ *  N个线程 → [value]   线程0 → Cell[0] ─┐
+ *                      线程1 → Cell[1]  │
+ *    所有线程          线程2 → Cell[2]  ├→ sum() = base + Σcells
+ *   CAS 同一个值        线程3 → Cell[3] ─┘
+ *
+ *    星星挤            星星散开各加各的
+ * ```
+ *
+ * ---
+ *
+ * ## 可能被追问的点
+ *
+ * | 追问 | 回答 |
+ * |------|------|
+ * | **sum() 是精确的吗？** | 不是原子快照，遍历时有并发写在发生，适合 QPS 计数等允许微小误差的场景 |
+ * | **Cell 什么时候扩容？** | 当前线程 CAS 自己 Cell 失败 2 次就触发，翻倍到 CPU 核数为止 |
+ * | **hash 到哪个 Cell？** | 用 `ThreadLocalRandom.probe` 的 `getProbe()`，相当于线程 ID 的 hash，不用 ThreadLocal 免了内存泄漏风险 |
+ * | **和 AtomicLong 怎么选？** | 需要精确瞬时值用 AtomicLong，统计聚合用 LongAdder |
  */
 public class LongAdderDemo {
 

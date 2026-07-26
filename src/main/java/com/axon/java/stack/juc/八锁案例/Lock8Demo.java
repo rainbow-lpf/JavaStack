@@ -1,4 +1,4 @@
-package com.axon.java.stack.juc;
+package com.axon.java.stack.juc.八锁案例;
 
 import java.util.concurrent.TimeUnit;
 

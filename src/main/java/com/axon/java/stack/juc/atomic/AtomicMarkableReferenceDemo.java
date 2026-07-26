@@ -4,6 +4,11 @@ import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.atomic.AtomicMarkableReference;
 
+/**
+ *
+ * 一个引用 + 一个 boolean 标记 的原子配对。CAS 时同时检查"引用没变"和"标记没变"，两个都匹配才更新。
+ *
+ */
 public class AtomicMarkableReferenceDemo {
 
 

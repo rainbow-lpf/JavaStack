@@ -248,7 +248,7 @@ public class aqsTestDemoTest {
      *  14.原来的哨兵节点的next 为null，则剔除队列。
      *
      *
-     *
+     *  假设 线程A 和线程B 去同时争
      *  chatGPT  解释：
      *
      *  1.	AQS 状态表示和初始状态：

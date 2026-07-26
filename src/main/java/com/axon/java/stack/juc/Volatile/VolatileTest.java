@@ -1,4 +1,4 @@
-package com.axon.java.stack.juc;
+package com.axon.java.stack.juc.Volatile;
 
 import java.util.concurrent.atomic.AtomicInteger;
 

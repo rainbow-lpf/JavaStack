@@ -1,4 +1,4 @@
-package com.axon.java.stack.juc;
+package com.axon.java.stack.juc.Volatile;
 
 /**
  * 禁止指令重排序

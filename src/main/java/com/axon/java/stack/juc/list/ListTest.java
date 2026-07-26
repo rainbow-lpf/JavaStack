@@ -70,6 +70,7 @@ public class ListTest {
          * 	1.	数据结构：数组 + 链表/红黑树
          * 	2.	哈希冲突解决：采用拉链法，即相同哈希值的元素存储在同一个链表/红黑树中。
          * 	3.	扩容：当数组中的元素超过一定比例（负载因子，默认 0.75）时，会进行数组扩容，将现有元素重新散列到新的更大的数组中。
+         * 	4.  当某个桶中链表长度达到 8 以上，且数组长度达到 64，转为红黑树。数组长度不足 64 则扩容。
          *
          * ConcurrentHashMap 底层原理
          *
@@ -79,6 +80,10 @@ public class ListTest {
          * 	•	JDK 8 及之后：
          * 	•	数据结构：哈希桶数组 + 链表/红黑树
          * 	•	CAS 和 Synchronized：通过 CAS 操作保证并发安全，链表转红黑树时使用 Synchronized 进行加锁。扩容时也使用类似的机制，减少对整个表的锁定范围。
+         *
+         * 	JDK 7： 默认 16 个 Segment，每个是 ReentrantLock + 小 HashMap 的合体。Segment 内 ReentrantLock 保护，Segment 间并发。锁粒度到段。
+         *
+         *  JDK 8： 就一个 Node 数组。空桶 CAS 插入无锁，有数据 synchronized 锁桶头。锁粒度到桶。
          *
          * 适用场景
          *
