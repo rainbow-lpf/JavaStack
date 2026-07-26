@@ -1,0 +1,64 @@
+要优化外卖平台每天处理 1000 万笔订单查询的性能，可以从以下几个方面入手：
+
+### 1. **数据库优化**
+- **索引优化**：为高频查询的字段（如订单ID、用户ID、状态、创建时间等）建立合适的索引。
+- **分库分表**：根据订单的时间或区域进行分库分表，减少单表数据量。
+- **读写分离**：主库负责写操作，从库负责读操作，分散数据库压力。
+- **查询优化**：避免使用 `SELECT *`，只查询必要的字段；优化复杂的 SQL 查询。
+
+### 2. **缓存机制**
+- **本地缓存**：对热点数据（如热门订单、用户常用订单）使用本地缓存（如 Guava Cache）。
+- **分布式缓存**：使用 Redis 或 Memcached 缓存高频查询结果，减少数据库访问。
+- **缓存预热**：在高峰期前预加载热点数据到缓存中。
+- **缓存过期策略**：设置合理的过期时间，确保数据的时效性。
+
+### 3. **异步与批量处理**
+- **异步查询**：对于非实时性要求高的查询，使用消息队列（如 Kafka、RabbitMQ）异步处理。
+- **批量查询**：将多次小查询合并为一次大查询，减少数据库连接开销。
+
+### 4. **API 优化**
+- **分页查询**：对于返回大量数据的接口，使用分页查询，避免一次性加载过多数据。
+- **字段裁剪**：只返回必要的字段，减少数据传输量。
+- **接口限流**：对高频访问的接口设置限流，防止流量过载。
+
+### 5. **分布式架构**
+- **负载均衡**：使用 Nginx 或其他负载均衡器分发流量到多个服务实例。
+- **服务拆分**：将订单查询服务拆分为独立的微服务，按功能模块化。
+- **分布式数据库**：使用分布式数据库（如 TiDB、CockroachDB）处理大规模数据。
+
+### 6. **监控与调优**
+- **性能监控**：使用 APM 工具（如 SkyWalking、Pinpoint）监控查询性能，定位慢查询。
+- **日志分析**：分析查询日志，发现热点查询和异常流量。
+- **动态扩容**：根据流量动态扩展服务实例，提升系统吞吐量。
+
+### 示例：使用 Redis 缓存订单查询
+以下是一个简单的示例，展示如何使用 Redis 缓存订单查询结果：
+
+```java
+import redis.clients.jedis.Jedis;
+
+public class OrderService {
+    private Jedis jedis = new Jedis("localhost");
+
+    public String getOrderDetails(String orderId) {
+        String cacheKey = "order:" + orderId;
+        String orderDetails = jedis.get(cacheKey);
+
+        if (orderDetails == null) {
+            // 从数据库查询订单
+            orderDetails = queryOrderFromDatabase(orderId);
+            // 将结果缓存到 Redis，设置过期时间为 1 小时
+            jedis.setex(cacheKey, 3600, orderDetails);
+        }
+
+        return orderDetails;
+    }
+
+    private String queryOrderFromDatabase(String orderId) {
+        // 模拟数据库查询
+        return "Order details for " + orderId;
+    }
+}
+```
+
+通过以上方法，可以有效提升订单查询的性能和系统的可扩展性。

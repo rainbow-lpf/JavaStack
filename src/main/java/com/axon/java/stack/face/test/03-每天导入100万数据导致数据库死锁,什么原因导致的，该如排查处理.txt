@@ -1,0 +1,68 @@
+**原因分析**
+数据库死锁通常是由于多个事务持有资源并相互等待释放资源导致的。每天导入 100 万数据可能导致死锁的原因包括：
+1. **批量插入未分批处理**：一次性插入大量数据，导致锁资源竞争激烈。
+2. **索引更新冲突**：插入数据时更新索引，多个事务同时操作相同的索引页。
+3. **事务未及时提交**：长时间持有锁，导致其他事务无法获取资源。
+4. **表设计问题**：如外键约束或触发器引发额外的锁竞争。
+5. **并发控制不当**：多个线程同时插入数据，导致锁冲突。
+
+---
+
+**排查方法**
+1. **查看死锁日志**：
+   - MySQL：通过 `SHOW ENGINE INNODB STATUS` 查看死锁信息。
+   - 其他数据库：检查数据库的死锁监控日志。
+2. **分析执行计划**：检查插入语句是否导致索引冲突或锁等待。
+3. **监控锁等待**：使用数据库监控工具（如 MySQL Performance Schema）查看锁等待情况。
+4. **检查表设计**：确认是否存在外键、触发器或不必要的索引。
+5. **模拟并发场景**：通过测试环境重现问题，分析死锁原因。
+
+---
+
+**处理方法**
+1. **分批插入**：将 100 万数据分成小批次（如每次 1000 条）插入，减少锁竞争。
+2. **关闭外键约束**：在批量插入前临时关闭外键约束，插入完成后再启用。
+3. **优化索引**：确保索引设计合理，避免不必要的索引更新。
+4. **调整事务粒度**：减少事务范围，及时提交事务，避免长时间持有锁。
+5. **使用队列控制并发**：限制并发线程数，避免过多线程同时插入数据。
+6. **表分区或分表**：将数据分散到多个分区或表中，减少单表锁竞争。
+
+---
+
+**示例代码：分批插入数据**
+以下是一个分批插入的示例，避免一次性插入导致死锁：
+
+```java
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.util.List;
+
+public class BatchInsert {
+    private static final int BATCH_SIZE = 1000;
+
+    public void insertData(List<String> dataList, Connection connection) throws SQLException {
+        String sql = "INSERT INTO your_table (column1) VALUES (?)";
+        try (PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
+            int count = 0;
+            for (String data : dataList) {
+                preparedStatement.setString(1, data);
+                preparedStatement.addBatch();
+                count++;
+
+                if (count % BATCH_SIZE == 0) {
+                    preparedStatement.executeBatch();
+                }
+            }
+            // Execute remaining batch
+            preparedStatement.executeBatch();
+        }
+    }
+}
+```
+
+**说明**：
+- 将数据分批插入，每批次 1000 条，减少锁竞争。
+- 确保事务及时提交，避免长时间持有锁。
+
+通过以上方法，可以有效减少死锁的发生概率。
