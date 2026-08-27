@@ -228,3 +228,83 @@ SELECT * FROM order WHERE id > #{lastId} ORDER BY id LIMIT 20
 ```
 
 > ShardingSphere 5.x 的 Federation 引擎支持跨分片关联查询和子查询优化，但对深度分页仍然建议业务层配合游标分页。
+
+---
+
+## 六、生产环境偶发 Full GC 频繁/超时——没有堆快照，只有 GC 日志，如何排查？
+
+### 一句话
+
+先从 GC 日志判定触发原因和内存行为模式（泄漏 vs 吞吐大），再用低开销手段抓现场，根治靠 OOM 自动转储常态化。
+
+### 第一步：榨干 GC 日志信息
+
+用 **GCViewer / GCEasy** 解析日志，重点看四件事：
+
+1. **GC 原因字段**
+
+| 原因 | 含义 | 指向 |
+|------|------|------|
+| `Allocation Failure` | 分配失败，空间不足 | 分配过快 / 堆太小 |
+| `Metadata GC Threshold` | 元空间到达阈值 | 动态类生成过多（CGLIB、Groovy、脚本引擎） |
+| `System.gc()` | 显式调用 | 第三方库或 RMI 定时触发 → `-XX:+DisableExplicitGC` |
+| `Ergonomics` | JVM 自适应策略抖动 | 参数配置问题 |
+| `Concurrent Mode Failure` / ` Promotion Failed` | CMS 并发失败/晋升失败 | 回收速度赶不上分配速度 |
+
+2. **每次 Full GC 回收效果**
+
+- FGC 后老年代 baseline **逐次抬升**（阶梯型）→ 内存泄漏，迟早 OOM
+- FGC 后回落到**同一条水平线**，间隔随流量缩短 → 非泄漏，流量大或堆太小
+
+3. **晋升速率**
+
+- Minor GC 间隔持续变短 + 老年代增速恒定 → 对象过早晋升，Survivor 配置不足
+- 可计算每秒晋升 MB 数：判断该扩容还是改参
+
+4. **Metaspace 曲线**
+
+只涨不跌 → 类加载器泄漏
+
+同时关联**业务时间轴**：FGC 时间点与定时任务、批处理、发布、大促请求峰值是否重合。
+
+### 第二步：按曲线类型分叉排查
+
+| 日志特征 | 结论 | 动作 |
+|---------|------|------|
+| 回收后 baseline 递增 | 泄漏 | 抓对象分布定位引用链 |
+| 回收干净但间隔短 | 分配速率高 | 大对象？未分页 SQL？突发流量？ |
+| FGC 回收很少 | 存活对象巨多 | 缓存/静态集合持有过量引用 |
+| 堆平稳但仍 FGC | 显式 System.gc 或参数 | DisableExplicitGC / 调参 |
+
+### 第三步：复发时抓现场（无快照的补救手段）
+
+低风险顺序：
+
+```bash
+# 1. 每 1s 记录各代占用趋势（最轻）
+jstat -gcutil <pid> 1000 >> gc.log
+
+# 2. 对象直方图 topN（不触发 GC，开销小）
+jmap -histo <pid> | head -30
+
+# 3. 确认泄漏后再 dump
+#    注意：live 参数会先触发一次 Full GC，生产慎用
+jmap -dump:format=b,file=heap.hprof <pid>
+```
+
+推荐 **Arthas**：`memory`、`heapdump`、`vmtool --action getInstances`，开销可控。
+MAT 分析 **dominator tree** 找 GC Root 引用链。
+
+### 第四步：事后预防（面试加分点）
+
+```bash
+-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/data/dump/
+```
+
+- OOM 时自动转储常态化配置，出事才有现场
+- `jstat` 定时采集接入监控（Prometheus JMX Exporter），老年代趋势可视化提前告警
+- 不等出事再查，让内存曲线先说话
+
+### 总结话术
+
+> 先从日志判定触发原因和内存行为模式 → 区分"泄漏"和"吞吐大"两条路径 → 无快照则用 `jstat` + `jmap -histo` 低成本抓现场，确认后再 dump → 根治靠 HeapDumpOnOOM 常态化 + 监控提前告警，而非等出事。
