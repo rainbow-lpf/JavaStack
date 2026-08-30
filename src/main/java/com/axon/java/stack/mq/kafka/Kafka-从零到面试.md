@@ -187,6 +187,117 @@ offset=2: "订单发货"     ← 第 3 条
 offset=3: "订单完成"     ← 第 4 条
 ```
 
+### 4.2.1 深入：一条消息到底怎么定位（对比 RocketMQ）
+
+先看 RocketMQ 的寻址链（已讲过）：
+
+```
+consumerOffset.json 拿 offset → offset×20 定位 ConsumeQueue 索引
+→ 索引里 offsetPy + sizePy → 去 CommitLog 读正文
+```
+
+Kafka 是同一套思想，但**索引是稀疏的**，所以多了一步"近似定位 + 顺序扫"。
+
+**存储：每个分区独立目录，三件套**
+
+```
+Topic: order
+ └─ Partition-0/
+     ├─ 00000000000000000000.log        ← 段日志：消息正文，append-only
+     ├─ 00000000000000000000.index      ← 偏移索引：offset → .log 物理位置
+     ├─ 00000000000000000000.timeindex  ← 时间索引：时间戳 → offset
+     └─ 00000000001073741824.log...     ← 写满 1GB 滚下一个段
+
+文件名 = 该段的起始 offset（baseOffset）
+```
+
+**关键区别：Kafka 索引是"稀疏"的**
+
+```
+RocketMQ ConsumeQueue：每条消息一条索引，稠密
+  → offset × 20 一步精确命中 O(1)
+
+Kafka .index：不每条都记，默认每攒 4KB（log.index.interval.bytes）才记一条
+  每条索引 8 字节 = 4B 相对 offset + 4B .log 物理位置
+  → 稀疏省空间，但只能定位到"近似位置"，再顺序扫几行到精确 offset
+```
+
+**完整读取流程**
+
+```
+① 消费位点存 __consumer_offsets 内部 topic（不是 json 文件）
+   消费者组 → 各分区的 offset
+
+② Consumer 发 Fetch 请求：topic + partition + offset=500
+
+③ Broker 定位段：二分查找所有 .log 文件名（baseOffset）
+   找到 baseOffset <= 500 < 下一个 baseOffset 的那个段
+
+④ 段内查 .index：二分找"最大的 <= (500 - baseOffset)"的稀疏条目
+   → 拿到 .log 里的大致物理位置
+
+⑤ seek 到该位置，顺序往前扫到 offset=500 → 读出消息 batch
+
+⑥ 返回给消费者
+```
+
+**时序图：一次拉取的全过程**
+
+```
+Consumer                              Broker（Partition-0 磁盘）
+   │                                      │
+   │ ① 从 __consumer_offsets 拿到         │
+   │    该组该分区的 offset=500            │
+   │                                      │
+   │ ② Fetch 请求：                       │
+   │    topic=order, partition=0,         │
+   │    offset=500                        │
+   │ ─────────────────────────────────→  │
+   │                                      │ ③ 定位段（二分找文件名 baseOffset）
+   │                                      │    ├─ 000...000.log  baseOffset=0
+   │                                      │    ├─ 000...300.log  baseOffset=300   ← 500 在这段
+   │                                      │    └─ 000...600.log  baseOffset=600
+   │                                      │    （300 <= 500 < 600 → 选 baseOffset=300 的段）
+   │                                      │
+   │                                      │ ④ 查该段 .index（二分，稀疏）
+   │                                      │    相对 offset = 500 - 300 = 200
+   │                                      │    .index 里最接近 200 的条目
+   │                                      │    → 拿到 .log 的大致物理位置
+   │                                      │
+   │                                      │ ⑤ seek 到该位置，顺序向前扫
+   │                                      │    扫到 offset=500 的精确位置
+   │                                      │    → 读出这条消息（及其所在 batch）
+   │                                      │
+   │ ⑥ 返回消息 + nextOffset=501         │
+   │ ←───────────────────────────────── │
+   │                                      │
+   │ ⑦ 业务处理成功 → 提交 offset=501     │
+   │ ─────────────────────────────────→  │ ⑧ 写回 __consumer_offsets
+   │                                      │    （异步定期提交）
+```
+
+**一句话链条（对应 RocketMQ 那句话）：**
+
+```
+__consumer_offsets 的 offset（第几条）
+  → 二分定位段（baseOffset）
+  → 二分定位 .index 近似位置（稀疏）
+  → 顺序扫到精确 offset → 读 .log 正文
+  → 消费成功 → 提交 offset+1
+```
+
+两次二分 + 一小段顺序扫；对比 RocketMQ 的"×20 一步到位"，Kafka 用**稀疏索引省空间，代价是多两步查找**。
+
+**对比速记**
+
+| | RocketMQ | Kafka |
+|---|----------|-------|
+| 正文 | CommitLog 全局混写 | 每分区独立 .log 段 |
+| 索引 | ConsumeQueue 20B/条，稠密 | .index 8B/条，稀疏（每4KB一条） |
+| 定位 | offset×20 一步精确 O(1) | 二分找段 + 二分找近似位置 + 顺序扫到精确 |
+| 位点存哪 | consumerOffset.json | __consumer_offsets 内部 topic |
+| 设计取向 | 定长稠密索引换 O(1) | 稀疏索引省空间，换一点点扫描 |
+
 ### 4.3 消息回溯 — 这是 Kafka 的绝活
 
 ```

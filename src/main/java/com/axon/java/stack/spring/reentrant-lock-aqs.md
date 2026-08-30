@@ -200,7 +200,51 @@ enq() 里 CAS 设置 tail → 新节点先连自己的 prev
 
 ---
 
-## 八、面试总结话术
+## 八、ReentrantLock 遵循锁升级策略吗？
+
+### 结论
+
+**不遵循。"锁升级"（偏向锁 → 轻量级锁 → 重量级锁）是 JVM 层面 synchronized 的专属机制**，作用于**对象头 Mark Word**，由 JVM 自动完成。
+
+`ReentrantLock` 是 **JDK API 层**的纯 Java 实现（AQS = `state` + CAS + CLH 队列 + `park/unpark`），没有 Mark Word、没有 Monitor，**不存在锁升级**——加锁路径从一而终：
+
+```
+CAS 抢 state → 抢不到入 CLH 队列 → 自旋几下（有限次）→ park 挂起
+```
+
+### 两者对比
+
+| | `synchronized` | `ReentrantLock` |
+|---|----------------|-----------------|
+| 层面 | JVM 内置（字节码 monitorenter/exit） | JDK 类库（AQS） |
+| 锁数据 | 对象头 Mark Word + ObjectMonitor | AQS 的 `volatile state` |
+| **锁升级** | ✅ 无锁→偏向→轻量→重量 | ❌ 无此概念 |
+| 优化手段 | JVM 自适应自旋、锁消除、锁粗化 | CAS 自旋失败即 park，不烧 CPU |
+| 公平性 | 只有非公平 | 公平/非公平可选 |
+| 重入 | 都支持（Mark Word 记录 owner+计数 / state 计数） | 同 |
+
+### 两个容易混淆的点
+
+#### 1. ReentrantLock 的"自旋" ≠ 锁升级
+
+`acquireQueued` 抢不到锁时会**自旋几次**（前驱是 head 时再试 CAS），失败才 park——这只是**减少挂起/唤醒开销的优化**，不是"轻量级锁升级成重量级锁"的形态转换。
+
+#### 2. 真正存在的是"锁降级"——属于 `ReentrantReadWriteLock`
+
+```java
+rw.writeLock().lock();      // 持有写锁
+rw.readLock().lock();       // 写锁内再拿读锁
+rw.writeLock().unlock();    // 释放写锁 → 此时只持读锁 = 降级 ✅
+```
+
+- **可以降级**：写 → 读（保证写完的数据立即可见，不被别的写插队）
+- **不能升级**：持读锁直接要写锁 → 两个线程都这么干会**互相等对方释放读锁 → 死锁**
+
+### 话术（30 秒）
+
+> 不遵循。锁升级是 synchronized 的 JVM 机制——对象头 Mark Word 从偏向锁到轻量级锁到重量级锁的膨胀过程；ReentrantLock 是 API 层基于 AQS 的纯 Java 实现，state + CAS + CLH 队列 + park，没有 Mark Word 也就没有升级链。它抢锁失败自旋几下就 park 挂起，不烧 CPU。"升级"和 ReentrantLock 无关，但"降级"概念在 ReentrantReadWriteLock 里有——写锁内拿读锁再放写锁即降级，反过来读升写会死锁。
+
+## 九、面试总结话术
 
 ### lock/unlock 原理（30 秒）
 

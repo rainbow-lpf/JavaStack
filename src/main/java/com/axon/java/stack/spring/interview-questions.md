@@ -103,6 +103,47 @@ java.lang.OutOfMemoryError: Metaspace
 
 ---
 
+### 存储：用 BIGINT 还是 VARCHAR？
+
+**用 `BIGINT`，不要 `VARCHAR`。** 雪花就是 64 位 long，MySQL `BIGINT` 正好 8 字节有符号整数——天生一对。
+
+| 维度 | `BIGINT` | `VARCHAR(20)` |
+|------|----------|---------------|
+| 存储 | 定长 8 字节 | 变长 19~20 字节 + 长度位 |
+| B+ 树索引 | 整数比较，页内密集 | 字符串逐字符比较（走 collation），树更高 |
+| 排序 | 数值序 | 字典序 |
+| 聚簇索引插入 | 趋势递增，顺序写 ✅ | 存储成本高 |
+
+**会不会超过 BIGINT 最大值？不会，关键在符号位：**
+
+```
+BIGINT 上限 = 2^63 - 1 = 9223372036854775807
+
+值 = (now - epoch) << 22 | machineId << 12 | sequence
+时间戳增量 < 2^41（约 69 年）→ 左移 22 位后 < 2^63
+→ 符号位（首位）恒 0 → 永远 ≤ 2^63 - 1 → 不溢出 ✅
+```
+
+- 41 位时间戳从自定义纪元起算 ≈ 69.7 年（Twitter 纪元 2010 → 约 2079 年耗尽），到期换纪元即可
+- ⚠️ 自己改位分配（时间戳占 42 位）会顶掉符号位 → 生成负数
+
+**真正的坑不在 DB，在 JS 精度：**
+
+```javascript
+// JS Number 安全整数上限 2^53
+Number("9223372036854775807")  // → 9223372036854776000  ❌ 精度丢了
+```
+
+后端 JSON 序列化时把 Long 转 String（`@JsonSerialize(using = ToStringSerializer.class)` 或 MyBatis-Plus 全局 `write-numbers-as-strings`），前端当字符串处理。
+
+> **结论：DB 存 BIGINT，传输转 String，各干各的。**
+
+### 话术（30 秒）
+
+> 存 BIGINT。雪花是 64 位 long，和 BIGINT 一一对应——8 字节定长、整数比较、趋势递增对 B+ 树友好；varchar 空间翻倍、比较走字符集。溢出问题不存在：首位符号位恒 0，最大值恰好是 2^63-1 即 BIGINT 上限，时间戳 41 位有 69 年余量。真正要防的是 JS 精度丢失——Number 安全整数只有 2^53，后端序列化时 Long 转 String。
+
+---
+
 ## 四、`@Transactional` 和自定义注解——执行顺序
 
 ### 答案
@@ -308,3 +349,146 @@ MAT 分析 **dominator tree** 找 GC Root 引用链。
 ### 总结话术
 
 > 先从日志判定触发原因和内存行为模式 → 区分"泄漏"和"吞吐大"两条路径 → 无快照则用 `jstat` + `jmap -histo` 低成本抓现场，确认后再 dump → 根治靠 HeapDumpOnOOM 常态化 + 监控提前告警，而非等出事。
+
+---
+
+## 七、@Service/@Component/@Controller 都会走 AOP 代理吗？
+
+### 结论
+
+**不会。** `@Component`/`@Service`/`@Controller` 只干一件事：让类被扫描进容器成为 Bean，**和代理零关系**。
+
+### 误区根源
+
+```
+@Component/@Service/@Controller/@Repository
+    → 唯一作用：类被 Spring 扫描进容器，成为 Bean
+    → 要不要代理，由"是否被 Advisor 匹配"决定，与这几个注解无关
+```
+
+### 真正决定代理的逻辑
+
+`AnnotationAwareAspectJAutoProxyCreator`（本质是 `AbstractAutoProxyCreator`，一个 `BeanPostProcessor`）在 **postProcessAfterInitialization** 阶段：
+
+```
+① 拿到容器里所有 Advisor（切面/拦截器）
+② 对当前 Bean 逐个 Advisor 用切点表达式匹配（类 + 方法）
+③ 命中任意一个 → 创建代理（JDK/CGLIB）
+④ 一个都没命中 → 原样返回 Bean，不代理 ✅
+```
+
+裸的 `@Service`，没有事务、没有切面、没标 `@Async/@Cacheable`——拿到的就是**原始对象，无任何代理**。
+
+### 哪些情况会触发代理
+
+| 标记/配置 | 对应 Advisor | 走代理？ |
+|-----------|-------------|:---:|
+| `@Transactional` | `TransactionInterceptor`（BeanFactoryTransactionAttributeSourceAdvisor） | ✅ |
+| `@Async` | `AsyncAnnotationAdvisor` | ✅ |
+| `@Cacheable` | `CacheInterceptor`（BeanFactoryCacheOperationSourceAdvisor） | ✅ |
+| `@Aspect` 切面 + 切点命中 | 业务切面 Advisor | ✅ |
+| 方法级 `@Validated` | MethodValidationPostProcessor | ✅ |
+| 只有 `@Service/@Component` | 无 | ❌ 原样返回 |
+
+### 验证方式（现场可写）
+
+```java
+AopUtils.isAopProxy(bean)        // 是不是代理
+bean.getClass().getName()        // 含 $$SpringCGLIB → CGLIB 代理
+AopUtils.isJdkDynamicProxy(bean) // 是否 JDK 代理
+```
+
+### 两个延伸点（面试加分）
+
+1. **@Controller 的拦截器 ≠ AOP**：`HandlerInterceptor` 是 MVC 层责任链机制，走 `HandlerExecutionChain`，和 AOP 代理两码事——没切面的 @Controller 同样不是 AOP 代理
+2. **同类内方法自调用不走代理**：`this.methodB()` 绕过代理对象 → `@Transactional` 失效——"有代理但看起来没生效"的经典坑
+
+### 总结话术
+
+> 不会。@Component/@Service/@Controller 只是声明"这是 Bean"，和代理无关。代理的触发条件是被 Advisor 匹配：@Transactional、@Async、@Cacheable、以及 @Aspect 切点命中的 Bean 才会被 AbstractAutoProxyCreator 在初始化后包一层代理；裸的 @Service 原样返回，用 AopUtils.isAopProxy 可验证。另外注意 HandlerInterceptor 是 MVC 拦截器不是 AOP，以及同类内 this 自调用会绕过代理。
+
+---
+
+## 八、自定义注解会触发 AOP 代理吗？
+
+### 结论
+
+**不会。** 注解只是**标记**，不是**功能**。自定义注解如果没有切面/拦截器/后处理器去识别它，就是纯摆设——Bean 原样返回，无代理。
+
+### 让它生效的三条路
+
+#### 路 1：@Aspect 切面 + 切点表达式（最常用）
+
+```java
+// ① 自定义注解
+@Target(ElementType.METHOD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface MyLog { String value() default ""; }
+
+// ② 切面消费它 —— 切点表达式就是"点名"这个注解
+@Aspect
+@Component
+public class MyLogAspect {
+
+    @Pointcut("@annotation(myLog)")
+    public void pointcut(MyLog myLog) {}
+
+    @Around("pointcut(myLog)")
+    public Object around(ProceedingJoinPoint pjp, MyLog myLog) throws Throwable {
+        long start = System.currentTimeMillis();
+        try {
+            return pjp.proceed();
+        } finally {
+            log.info("[{}] {}#{} cost {}ms",
+                myLog.value(), pjp.getTarget().getClass().getSimpleName(),
+                pjp.getSignature().getName(), System.currentTimeMillis() - start);
+        }
+    }
+}
+```
+
+被 `@MyLog` 标记的方法 → 切点命中 → 该 Bean 走 AOP 代理 ✅
+
+**和 @Transactional 完全同构**：@Transactional 背后就是 `TransactionInterceptor` 这个 Advisor + 切点匹配 @Transactional 注解。
+
+#### 路 2：@Transactional 同款——自定义 Advisor/Interceptor（不写 @Aspect）
+
+```java
+// 自定义拦截器
+public class MyLogInterceptor implements MethodInterceptor {
+    @Override
+    public Object invoke(MethodInvocation invocation) throws Throwable {
+        return invocation.proceed();
+    }
+}
+
+// 注册成 Advisor：切点 = 方法上有 @MyLog
+@Bean
+public Advisor myLogAdvisor() {
+    return new DefaultPointcutAdvisor(
+        new AnnotationMatchingPointcut(null, MyLog.class),   // 类级=null，方法级=@MyLog
+        new MyLogInterceptor());
+}
+```
+
+Bean 初始化后，`AbstractAutoProxyCreator` 发现该 Advisor 匹配方法 → 生成代理。
+
+#### 路 3：@Import 动态注册（注解当总开关）
+
+```java
+@Import(MyLogRegistrar.class)
+public @interface EnableMyLog { }
+```
+
+`@EnableTransactionManagement`、`@EnableAspectJAutoProxy`、`@EnableCaching` 都是这个套路——**注解只开总闸，真正干活的是它注册进来的 Bean**。
+
+### 两类切点表达式（易混点）
+
+| 表达式 | 匹配 | 场景 |
+|--------|------|------|
+| `@annotation(xxx)` | **方法上**有注解 | @MyLog 标在方法 |
+| `@within(xxx)` | **类上**有注解 | 类级注解，作用于类里所有方法 |
+
+### 总结话术
+
+> 自定义注解本身不会触发代理，它只是个标记。要生效必须有人消费：最常见是写个 @Aspect 切面，切点用 @annotation 或 @within 点名这个注解，被命中的 Bean 才会走代理——这和 @Transactional 被 TransactionInterceptor 匹配是同一机制；更底层可以自己实现 MethodInterceptor + AnnotationMatchingPointcut 包成 Advisor 注册进容器；或者用 @Import 动态注册组件当总开关。如果注解没有任何切面/Advisor 消费它，就是纯摆设，Bean 原样返回。
